@@ -4,7 +4,6 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from utils.utils import to_gpu
 
@@ -25,7 +24,7 @@ class BCEJaccardLoss:
             epsilon = 1e-15
 
             jaccard_targets = (targets == 1).float()
-            jaccard_outputs = F.sigmoid(outputs)
+            jaccard_outputs = torch.sigmoid(outputs)
 
             intersection = (jaccard_targets * jaccard_outputs).sum()
             union = jaccard_targets.sum() + jaccard_outputs.sum()

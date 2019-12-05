@@ -58,7 +58,7 @@ def prepare_train_valid(path2train):
         db_name = img_name.split('/')[-1].split('.')[0].split('_')[0]
         num = img_name.split('/')[-1].split('.')[0].split('_')[1]
 
-        road_maks, valid_mask = getGroundTruth(gt_images_path_list[idx])
+        road_mask, valid_mask = getGroundTruth(gt_images_path_list[idx])
         
         # if db_name == "uu":
         #     factor = ImageSpecifications.uu_cat
@@ -71,10 +71,10 @@ def prepare_train_valid(path2train):
 
         factor = 255
 
-        road_maks = road_maks.astype(dtype=np.uint8) * factor
+        road_mask = road_mask.astype(dtype=np.uint8) * factor
         valid_mask = (~valid_mask).astype(dtype=np.uint8) * factor
     
-        cv2.imwrite(str(train_masks / (db_name + '_' + num + ImageSpecifications.img_extension)), road_maks)
+        cv2.imwrite(str(train_masks / (db_name + '_' + num + ImageSpecifications.img_extension)), road_mask)
         cv2.imwrite(str(valid_masks / (db_name + '_' + num + ImageSpecifications.img_extension)), valid_mask)
 
 
@@ -197,6 +197,42 @@ def crossval_split(images_paths: str, masks_paths: str, fold=5):
     return ((train_imgs_total, train_masks_total), (valid_imgs_total, valid_masks_total))
 
 
+def crossval_split_a2d2(imgs_paths: list, masks_paths: list, fold=5):
+    """
+        Splits images and masks by two sets: train and validation by folds with a small stratification by categories 'uu', 'um' and 'umm'.
+        Possible value for 'fold' is: 1, 2, 3, 4, 5
+
+        params:
+            imgs_paths      :   list with source images(without validation area)
+            masks_paths       :   list with masks
+            fold              :   number of validation fold
+    """
+
+    if len(imgs_paths) < 5:
+        raise RuntimeError("Length of imgs_paths less then 5.")
+
+    if fold not in range(1, 6):
+        raise ValueError("Invalid fold number: {}. 'fold' can be 1,2,3,4 or 5.".format(fold))
+
+    assert len(imgs_paths) == len(masks_paths), "Error: imgs_paths and masks_paths has different length."
+
+    imgs_per_fold = round(len(imgs_paths) / 5)
+
+    # train urban unmarked
+    if fold == 5:
+        valid_imgs_paths = imgs_paths[-(len(imgs_paths) - imgs_per_fold * 4):]
+        valid_masks_paths = masks_paths[-(len(imgs_paths) - imgs_per_fold * 4):]
+        train_imgs_paths = imgs_paths[:(imgs_per_fold * 4)]
+        train_masks_paths = masks_paths[:(imgs_per_fold * 4)]
+    else:
+        valid_imgs_paths = imgs_paths[(fold-1)*imgs_per_fold:fold * imgs_per_fold]
+        valid_masks_paths = masks_paths[(fold-1)*imgs_per_fold:fold * imgs_per_fold]
+        train_imgs_paths = imgs_paths[:(fold-1)*imgs_per_fold] + imgs_paths[fold*imgs_per_fold:]
+        train_masks_paths = masks_paths[:(fold-1)*imgs_per_fold] + masks_paths[fold*imgs_per_fold:]
+
+    return ((train_imgs_paths, train_masks_paths), (valid_imgs_paths, valid_masks_paths))
+
+
 def prepare_holdout_dataset(path2data, test_fraction=0.2, original=True, rnd=False, state=111):
     """
         This method splits a train dataset on train and hold-out data and save this data in a separately directory.
@@ -303,8 +339,8 @@ if __name__ == "__main__":
     ap.add_argument("--train-dir", type=str, required=True, help="Path to a train dir(should contain 'gt_image_2' and 'image_2' subdirs).")
     args = ap.parse_args()
 
-    # prepare_train_valid(args.train_dir)
-    # drop_valid(args.train_dir)
-    prepare_holdout_dataset(path2data=args.train_dir, original=False)
+    prepare_train_valid(args.train_dir)
+    drop_valid(args.train_dir)
+#     prepare_holdout_dataset(path2data=args.train_dir, original=False)
 
     print("Done!")

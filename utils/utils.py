@@ -41,8 +41,15 @@ def to_gpu(x: torch.Tensor):
     return x.cuda(non_blocking=True) if torch.cuda.is_available() else x
 
 
-def save_model(model_path: str, model, best_jaccard, best_dice, best_uu_metrics, best_um_metrics, best_umm_metrics, epoch):
-    torch.save({"best_jaccard": best_jaccard, "best_dice": best_dice, "best_uu_metrics": best_uu_metrics, "best_um_metrics": best_um_metrics, "best_umm_metrics": best_umm_metrics, "epoch": epoch, "model": model}, model_path)
+def save_model(model_path: str, model, best_jaccard, best_dice, best_uu_metrics, best_um_metrics, best_umm_metrics,
+               epoch):
+    torch.save({"best_jaccard": best_jaccard, "best_dice": best_dice, "best_uu_metrics": best_uu_metrics,
+                "best_um_metrics": best_um_metrics, "best_umm_metrics": best_umm_metrics, "epoch": epoch,
+                "model": model}, model_path)
+
+def save_model_a2d2(model_path: str, model, best_jaccard, best_dice,epoch):
+        torch.save({"best_jaccard": best_jaccard, "best_dice": best_dice, "epoch": epoch,
+                    "model": model}, model_path)
 
 
 def make_info_string(sep=',', **kwargs):
@@ -331,6 +338,306 @@ def train_routine(
     write2csv(data=rec_csv_data, file_name=str(csvs_path / "rec.csv"), type_of_header="rec")
     write2csv(data=loss_csv_data, file_name=str(csvs_path / "loss.csv"), type_of_header="loss")
     write2csv(data=jacc_dice_csv_data, file_name=str(csvs_path / "jd.csv"), type_of_header="jd")
+
+
+def train_routine_a2d2(
+        args,
+        console_logger: logging.Logger,
+        root: str,
+        model: nn.Module,
+        criterion,
+        optimizer,
+        scheduler,
+        train_loader,
+        valid_loader,
+        fm_eval_dataset,
+        validation,
+        fold,
+        num_classes=1,
+        n_epochs=100,
+        status_every=5):
+    """
+        General trainig routine.
+        params:
+            args                    : argument parser parameters for saving it
+            console_logger          : logger object for logging
+            root                    : root dir where stores trained models
+            model                   : model for training
+            criterion               : loss function
+            optimizer               : SGD, Adam or other
+            scheduler               : learning rate scheduler
+            train_loader            :
+            valid_loader            :
+            fm_eval_dataset         : dataset for F-max evaluation
+            validation              : validation routine
+            fold                    : number of fold
+            num_classes             : number of classes
+            n_epochs                : number of training epochs
+            status_every            : the parameter which controls the frequency of status printing
+    """
+
+    # Load model if it exists
+    root = Path(root)
+    root.mkdir(exist_ok=True, parents=True)
+
+    model_root = root / args.model_type / 'model{}'.format(fold)
+    model_root.mkdir(exist_ok=True, parents=True)
+
+    # CSV
+    csvs_path = model_root / 'csv'
+    csvs_path.mkdir(exist_ok=True, parents=True)
+
+    model_path = model_root / 'model.pt'
+    logging_path = model_root / 'train.log'
+
+    # run params saving
+    save_runparams(vars(args), file_path=(model_root / 'rparams.txt'))
+
+    # file logger definition
+    file_logger = logging.getLogger("file-logger")
+    file_logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(str(logging_path), mode='w')
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    fh.setFormatter(formatter)
+    file_logger.addHandler(fh)
+
+    # Logging to the TensorBoardX
+    tbx_logger = Logger(log_dir=str(model_root / "tbxlogs"))
+
+    if model_path.exists():
+        state = torch.load(str(model_path))
+        epoch = state["epoch"]
+        best_jaccard = state["best_jaccard"]
+        best_dice = state["best_dice"]
+        # best_metrics = state["best_metrics"]
+        model.load_state_dict(state["model"])
+        console_logger.info(
+            "\nModel '{0}' was restored. Best Jaccard: {1}, Best DICE: {2}, Epoch: {3}".format(str(model_path),
+                                                                                               best_jaccard, best_dice,
+                                                                                               epoch))
+    else:
+        epoch = 1
+        best_jaccard = 0
+        best_dice = 0
+        # best_metrics = {"MaxF": 0, "AvgPrec": 0, "PRE": 0, "REC": 0}
+
+    n_epochs = n_epochs + epoch
+    best_model = copy.deepcopy(model.state_dict())
+
+    train_losses = []
+    valid_losses = []
+    jaccards = []
+    dices = []
+
+    # CSV data for logging
+    loss_csv_data = []
+    jacc_dice_csv_data = []
+    # maxf_csv_data = []
+    # avgprec_csv_data = []
+    # prec_csv_data = []
+    # rec_csv_data = []
+
+    for epoch in range(epoch, n_epochs):
+
+        epoch_train_losses = []
+
+        # Train mode
+        model.train()
+
+        # scheduler step
+        scheduler.step()
+
+        try:
+            for i, (inputs1, inputs2, targets) in enumerate(train_loader):
+                inputs1 = to_gpu(inputs1)
+                inputs2 = to_gpu(inputs2)
+                targets = to_gpu(targets)
+
+                optimizer.zero_grad()
+                with torch.set_grad_enabled(True):
+                    outputs = model(inputs1, inputs2)
+                    loss = criterion(targets, outputs)
+                    loss.backward()
+                    optimizer.step()
+                epoch_train_losses.append(loss.item())
+
+            # Train loss per epoch
+            epoch_train_loss = np.mean(epoch_train_losses).astype(dtype=np.float64)
+
+            # Validation
+            valid_dict = validation(model, criterion, valid_loader)
+            # metrics = fmeasure_evaluation([model], fm_eval_dataset)
+
+            train_losses.append(epoch_train_loss)
+            valid_losses.append(valid_dict["val_loss"])
+            jaccards.append(valid_dict["val_jacc"])
+            dices.append(valid_dict["val_dice"])
+
+            if valid_dict["val_jacc"] > best_jaccard:
+                best_jaccard = valid_dict["val_jacc"]
+                best_dice = valid_dict["val_dice"]
+                # best_metrics = {"MaxF": metrics["MaxF"], "AvgPrec": metrics["AvgPrec"],
+                #                    "PRE": metrics["PRE_wp"][0], "REC": metrics["REC_wp"][0]}
+                best_model = copy.deepcopy(model.state_dict())
+
+            if epoch and (epoch % status_every == 0):
+                info_str = "\nEpoch: {}, LR: {}\n".format(epoch, scheduler.get_lr())
+                info_str += "-" * 30
+                info_str += "\nTrain loss: {0}".format(epoch_train_loss)
+                info_str += "\nValid loss: {0}".format(valid_dict["val_loss"])
+                info_str += "\nValid Jaccard: {0}".format(valid_dict["val_jacc"])
+                info_str += "\nValid DICE: {0}\n".format(valid_dict["val_dice"])
+
+                # # MaxF, PRE, REC, AvgPrec printing
+                # info_str += "\nUU_MaxF: {0}".format(uu_metrics["MaxF"])
+                # info_str += "\nUU_AvgPrec: {0}".format(uu_metrics["AvgPrec"])
+                # info_str += "\nUU_PRE: {0}".format(uu_metrics["PRE_wp"][0])
+                # info_str += "\nUU_REC: {0}\n".format(uu_metrics["REC_wp"][0])
+                # info_str += "\nUM_MaxF: {0}".format(um_metrics["MaxF"])
+                # info_str += "\nUM_AvgPrec: {0}".format(um_metrics["AvgPrec"])
+                # info_str += "\nUM_PRE: {0}".format(um_metrics["PRE_wp"][0])
+                # info_str += "\nUM_REC: {0}\n".format(um_metrics["REC_wp"][0])
+                # info_str += "\nUMM_MaxF: {0}".format(umm_metrics["MaxF"])
+                # info_str += "\nUMM_AvgPrec: {0}".format(umm_metrics["AvgPrec"])
+                # info_str += "\nUMM_PRE: {0}".format(umm_metrics["PRE_wp"][0])
+                # info_str += "\nUMM_REC: {0}\n".format(umm_metrics["REC_wp"][0])
+                info_str += "-" * 30
+                info_str += "\n"
+                console_logger.info(info_str)
+
+                # Log to file
+                info_str = "\nepoch: {}, ".format(epoch)
+                info_str += "train_loss: {}, ".format(epoch_train_loss)
+                info_str += "val_loss: {}, ".format(valid_dict["val_loss"])
+                info_str += "val_jaccard: {}, ".format(valid_dict["val_jacc"])
+                info_str += "val_dice: {}\n".format(valid_dict["val_dice"])
+                file_logger.info(info_str)
+
+                # Log to the tbX
+                tbx_logger.log_scalars(tag="losses",
+                                       values={"train_loss": epoch_train_loss, "valid_loss": valid_dict["val_loss"]},
+                                       step=epoch)
+                tbx_logger.log_scalars(tag="metrics",
+                                       values={"jaccard": valid_dict["val_jacc"], "DICE": valid_dict["val_dice"]},
+                                       step=epoch)
+                # # MaxF
+                # tbx_logger.log_scalars(tag="MaxF", values={"uu_maxF": uu_metrics["MaxF"], "um_maxF": um_metrics["MaxF"],
+                #                                            "umm_maxF": umm_metrics["MaxF"], "mmaxF": (uu_metrics[
+                #                                                                                           "MaxF"] +
+                #                                                                                       um_metrics[
+                #                                                                                           "MaxF"] +
+                #                                                                                       umm_metrics[
+                #                                                                                           "MaxF"]) / 3},
+                #                        step=epoch)
+                # # AvgPrec
+                # tbx_logger.log_scalars(tag="AvgPrec",
+                #                        values={"uu_AvgPrec": uu_metrics["AvgPrec"], "um_AvgPrec": um_metrics["AvgPrec"],
+                #                                "umm_AvgPrec": umm_metrics["AvgPrec"], "mAvgPrec": (uu_metrics[
+                #                                                                                        "AvgPrec"] +
+                #                                                                                    um_metrics[
+                #                                                                                        "AvgPrec"] +
+                #                                                                                    umm_metrics[
+                #                                                                                        "AvgPrec"]) / 3},
+                #                        step=epoch)
+                # # PRE
+                # tbx_logger.log_scalars(tag="PRE",
+                #                        values={"uu_PRE": uu_metrics["PRE_wp"][0], "um_PRE": um_metrics["PRE_wp"][0],
+                #                                "umm_PRE": umm_metrics["PRE_wp"][0], "mPRE": (uu_metrics["PRE_wp"][0] +
+                #                                                                              um_metrics["PRE_wp"][0] +
+                #                                                                              umm_metrics["PRE_wp"][
+                #                                                                                  0]) / 3}, step=epoch)
+                # # REC
+                # tbx_logger.log_scalars(tag="REC",
+                #                        values={"uu_REC": uu_metrics["REC_wp"][0], "um_REC": um_metrics["REC_wp"][0],
+                #                                "umm_REC": umm_metrics["REC_wp"][0], "mREC": (uu_metrics["REC_wp"][0] +
+                #                                                                              um_metrics["REC_wp"][0] +
+                #                                                                              umm_metrics["REC_wp"][
+                #                                                                                  0]) / 3}, step=epoch)
+                #
+                # # Log to csv
+                # maxf_csv_data.append(
+                #     "{},{},{},{},{}".format(epoch, uu_metrics["MaxF"], um_metrics["MaxF"], umm_metrics["MaxF"],
+                #                             (uu_metrics["MaxF"] + um_metrics["MaxF"] + umm_metrics["MaxF"]) / 3).split(
+                #         ","))
+                # avgprec_csv_data.append(
+                #     "{},{},{},{},{}".format(epoch, uu_metrics["AvgPrec"], um_metrics["AvgPrec"], umm_metrics["AvgPrec"],
+                #                             (uu_metrics["AvgPrec"] + um_metrics["AvgPrec"] + umm_metrics[
+                #                                 "AvgPrec"]) / 3).split(","))
+                # prec_csv_data.append("{},{},{},{},{}".format(epoch, uu_metrics["PRE_wp"][0], um_metrics["PRE_wp"][0],
+                #                                              umm_metrics["PRE_wp"][0], (
+                #                                                          uu_metrics["PRE_wp"][0] + um_metrics["PRE_wp"][
+                #                                                      0] + umm_metrics["PRE_wp"][0]) / 3).split(","))
+                # rec_csv_data.append("{},{},{},{},{}".format(epoch, uu_metrics["REC_wp"][0], um_metrics["REC_wp"][0],
+                #                                             umm_metrics["REC_wp"][0], (
+                #                                                         uu_metrics["REC_wp"][0] + um_metrics["REC_wp"][
+                #                                                     0] + umm_metrics["REC_wp"][0]) / 3).split(","))
+                # loss_csv_data.append("{},{},{}".format(epoch, epoch_train_loss, valid_dict["val_loss"]).split(","))
+                # jacc_dice_csv_data.append(
+                #     "{},{},{}".format(epoch, valid_dict["val_jacc"], valid_dict["val_dice"]).split(","))
+
+        except KeyboardInterrupt:
+            console_logger.info("KeyboardInterrupt, saving snapshot.")
+            # save_model(str(model_path), best_model, best_jaccard, best_dice, best_uu_metrics, best_um_metrics, best_umm_metrics, epoch)
+            save_model_a2d2(str(model_path), best_model, best_jaccard, best_dice, epoch)
+            console_logger.info("Done!")
+
+    info_str = "\nTraining process is done!\n" + "*" * 30
+    info_str += "\nTrain loss: {0}".format(np.mean(train_losses).astype(dtype=np.float64))
+    info_str += "\nValid loss: {0}".format(np.mean(valid_losses).astype(dtype=np.float64))
+    info_str += "\nMean Jaccard: {0}".format(np.mean(jaccards).astype(dtype=np.float64))
+    info_str += "\nMean DICE: {0}".format(np.mean(dices).astype(dtype=np.float64))
+    info_str += "\nBest Jaccard: {0}".format(best_jaccard)
+    info_str += "\nBest DICE: {0}\n".format(best_dice)
+    # info_str += "\nBest UU_Metrics: {0}".format(best_uu_metrics)
+    # info_str += "\nBest UM_Metrics: {0}".format(best_um_metrics)
+    # info_str += "\nBest UMM_Metrics: {0}".format(best_umm_metrics)
+    # info_str += "\nMean MaxF: {0}\n".format((best_uu_metrics["MaxF"] + best_um_metrics["MaxF"] + best_umm_metrics["MaxF"])/3)
+
+    info_str += "*" * 30
+    console_logger.info(info_str)
+    file_logger.info(info_str)
+
+    # model saving
+    # save_model(str(model_path), best_model, best_jaccard, best_dice, best_uu_metrics, best_um_metrics, best_umm_metrics, n_epochs)
+    save_model_a2d2(str(model_path), best_model, best_jaccard, best_dice, n_epochs)
+
+    # Save to CSV
+    # write2csv(data=maxf_csv_data, file_name=str(csvs_path / "maxf.csv"), type_of_header="maxf")
+    # write2csv(data=avgprec_csv_data, file_name=str(csvs_path / "avgprec.csv"), type_of_header="avgprec")
+    # write2csv(data=prec_csv_data, file_name=str(csvs_path / "prec.csv"), type_of_header="prec")
+    # write2csv(data=rec_csv_data, file_name=str(csvs_path / "rec.csv"), type_of_header="rec")
+    write2csv(data=loss_csv_data, file_name=str(csvs_path / "loss.csv"), type_of_header="loss")
+    write2csv(data=jacc_dice_csv_data, file_name=str(csvs_path / "jd.csv"), type_of_header="jd")
+
+
+def binary_validation_routine_a2d2(model: nn.Module, criterion, valid_loader):
+    """
+        This method by the given criterion, model and validation loader calculates Jaccard and DICE metrics with the validation loss for binary problem
+    """
+    with torch.set_grad_enabled(False):
+        valid_losses = []
+        jaccards = []
+        dices = []
+
+        model.eval()
+        for idx, batch in enumerate(valid_loader):
+            inputs1, inputs2, targets = batch
+            inputs1 = to_gpu(inputs1)
+            inputs2 = to_gpu(inputs2)
+            targets = to_gpu(targets)
+            outputs = model(inputs1, inputs2)
+
+            loss = criterion(targets, outputs)
+            valid_losses.append(loss.item())
+            jaccards += batch_jaccard(targets, (outputs > 0).float())
+            dices += batch_dice(targets, (outputs > 0).float())
+
+        # Calculates losses
+        valid_loss = np.mean(valid_losses).astype(dtype=np.float64)
+        valid_jaccard = np.mean(jaccards).astype(dtype=np.float64)
+        valid_dice = np.mean(dices).astype(dtype=np.float64)
+
+        return {"val_loss": valid_loss, "val_jacc": valid_jaccard, "val_dice": valid_dice}
 
 
 def binary_validation_routine(model: nn.Module, criterion, valid_loader):
