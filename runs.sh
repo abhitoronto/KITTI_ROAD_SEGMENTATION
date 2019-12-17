@@ -9,7 +9,7 @@
 #
 #   ============LidCamNet=============
 #
-#fold1 early
+#fold2 early
 python3 main_a2d2.py \
     --root-dir="./trained_models/" \
     --dataset-path="/hdd/a2d2-data/dataset/" \
@@ -17,57 +17,36 @@ python3 main_a2d2.py \
     --lr=0.0005 \
     --model-type="lcn_early" \
     --batch-size=2 \
-    --fold=1 \
-    --n-epochs=5 \
+    --batch-factor=8 \
+    --fold=2 \
+    --n-epochs=25 \
     --scheduler="poly" \
     --gamma=0.9 \
     --alpha=0.3 \
     --num-workers=4 \
 
-#fold1 late
+
+
+#fold2 lcn
 python3 main_a2d2.py \
     --root-dir="./trained_models/" \
     --dataset-path="/hdd/a2d2-data/dataset/" \
     --optim="Adam" \
     --lr=0.0005 \
-    --model-type="lcn_late" \
+    --model-type="lcn" \
     --batch-size=2 \
-    --fold=1 \
-    --n-epochs=5 \
+    --batch-factor=8 \
+    --fold=2 \
+    --n-epochs=20 \
     --scheduler="poly" \
     --gamma=0.9 \
     --alpha=0.3 \
     --num-workers=4 \
 
-#fold3 early
-python3 main_a2d2.py \
-    --root-dir="./trained_models/" \
-    --dataset-path="/hdd/a2d2-data/dataset/" \
-    --optim="Adam" \
-    --lr=0.0005 \
-    --model-type="lcn_early" \
-    --batch-size=2 \
-    --fold=3 \
-    --n-epochs=5 \
-    --scheduler="poly" \
-    --gamma=0.9 \
-    --alpha=0.3 \
-    --num-workers=4 \
-
-#fold3 late
-python3 main_a2d2.py \
-    --root-dir="./trained_models/" \
-    --dataset-path="/hdd/a2d2-data/dataset/" \
-    --optim="Adam" \
-    --lr=0.0005 \
-    --model-type="lcn_late" \
-    --batch-size=2 \
-    --fold=3 \
-    --n-epochs=5 \
-    --scheduler="poly" \
-    --gamma=0.9 \
-    --alpha=0.3 \
-    --num-workers=4 \
+python3 prediction_a2d2.py --mode=single --model-path=./trained_models/lcn/model4/model.pt --model-type=lcn \
+--path2image=/media/a2d2-data/camera_lidar_semantic/20180807_145028/camera/cam_front_center/20180807145028_camera_frontcenter_000009786.png \
+--path2save=/home/abhinavg/Desktop --num-images=5 \
+--path2gt=/hdd/a2d2-data/camera_lidar_semantic/20180807_145028/image-gt/cam_front_center/20180807145028_image-gt_frontcenter_000009786.png
 
 ##fold2
 #python3 main.py \

@@ -159,6 +159,7 @@ class LidCamNetEarlyFusion(nn.Module):
             raise NotImplementedError("This type of initialization is not implemented.")
 
     def forward(self, x1, x2):
+        # TODO: Change this back
         x = torch.cat((x1, x2), 1)
 
         x = self.encoder(x)
@@ -244,7 +245,7 @@ class LidCamNetLateFusion(nn.Module):
         x2 = self.center(x2)
         x2 = self.decoder(x2)
 
-        x = torch.cat((x1, x2), 0)
+        x = torch.cat((x1, x2), 1)
         x = self.final(x)
 
         return x

@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import utils.utils as utils
 from utils.img_utils import alpha_overlay, normalize
 
-from data_processing.road_dataset import load_image_, numpy_to_tensor
+from data_processing.road_dataset import numpy_to_tensor
 
 from models.reknetm1 import RekNetM1
 from models.reknetm2 import RekNetM2

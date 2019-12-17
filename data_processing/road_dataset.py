@@ -125,7 +125,7 @@ class a2d2_dataset(Dataset):
             NN Outputs: binary mask of a specific colour
     """
 
-    def __init__(self, img_paths, mask_paths, transforms=None):
+    def __init__(self, img_paths, mask_paths, transform_image=None, normalize_image=None, normalize_lidar=None):
         """
             params:
                 img_paths         : list of lists with path to source RGB and XYZ images
@@ -135,10 +135,11 @@ class a2d2_dataset(Dataset):
         super().__init__()
         self.img_paths = img_paths
         self.mask_paths = mask_paths
-        self.transforms = transforms
+        self.transform_image = transform_image
+        self.normalize_image = normalize_image
+        self.normalize_lidar = normalize_lidar
 
-        if self.transforms:
-            print('a2d2_dataset: Transforms are not being used')
+        self.size = (480, 320)
 
         assert len(self.img_paths) == len(self.mask_paths), "Error. 'img_paths' and 'mask_paths' has different length."
 
@@ -153,8 +154,68 @@ class a2d2_dataset(Dataset):
         img_lidar = cv2.merge((img_x, img_y, img_z))
         mask = load_mask_(self.mask_paths[idx])
 
+        img_cam = rescale_frame(img_cam, self.size)
+        img_lidar = rescale_frame(img_lidar, self.size)
+        mask = rescale_frame(mask, self.size)
+
+        if self.transform_image and self.normalize_image and self.normalize_lidar:
+            augmented = self.transform_image(image=img_cam, image2=img_lidar, mask=mask)
+            img_cam, image_lidar, mask = augmented["image"], augmented["image2"], augmented["mask"]
+
+            augmented_cam = self.normalize_image(image=img_cam)
+            img_cam = augmented_cam["image"]
+
+            augmented_lidar = self.normalize_lidar(image=img_lidar)
+            img_lidar = augmented_lidar["image"]
+
         return [numpy_to_tensor(img_cam).float(),
                 numpy_to_tensor(img_lidar).float(),
+                torch.from_numpy(np.expand_dims(mask, 0)).float()]
+
+
+class a2d2_dataset_no_lidar(Dataset):
+    """
+        This is the dataset for the Audi a2d2 self driving data.
+        It loads
+            NN Inputs: RGB images | x-coord dense lidar images | y-"" | z-""
+            NN Outputs: binary mask of a specific colour
+    """
+
+    def __init__(self, img_paths, mask_paths,transform_image=None, normalize_image=None):
+        """
+            params:
+                img_paths         : list of lists with path to source RGB and XYZ images
+                                    the expected structure: img_paths[0] = [camera, x-img, y-img, z-img]
+                mask_paths        : list with paths to masks
+        """
+        super().__init__()
+        self.img_paths = img_paths
+        self.mask_paths = mask_paths
+        self.transform_image = transform_image
+        self.normalize_image = normalize_image
+
+        self.size = (480, 320)
+
+        assert len(self.img_paths) == len(self.mask_paths), "Error. 'img_paths' and 'mask_paths' has different length."
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img_cam = load_rgb_image_(self.img_paths[idx][0])
+        mask = load_mask_(self.mask_paths[idx])
+
+        img_cam = rescale_frame(img_cam, self.size)
+        mask = rescale_frame(mask, self.size)
+
+        if self.transform_image and self.normalize_image:
+            augmented = self.transform_image(image=img_cam, mask=mask)
+            img_cam, mask = augmented["image"], augmented["mask"]
+
+            augmented_cam = self.normalize_image(image=img_cam)
+            img_cam = augmented_cam["image"]
+
+        return [numpy_to_tensor(img_cam).float(),
                 torch.from_numpy(np.expand_dims(mask, 0)).float()]
 
 
@@ -167,6 +228,11 @@ def load_rgb_image_(img_path):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
+def load_image_(img_path):
+    img = cv2.imread(img_path)
+    return img
+
+
 def load_grayscale_image_(img_path):
     return cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
 
@@ -174,3 +240,7 @@ def load_grayscale_image_(img_path):
 def load_mask_(mask_path):
     mask = cv2.imread(mask_path, 0)
     return (mask / 255).astype(dtype=np.uint8)
+
+
+def rescale_frame(frame, size):
+    return cv2.resize(frame, size, interpolation =cv2.INTER_AREA)

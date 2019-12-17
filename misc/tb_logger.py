@@ -35,3 +35,10 @@ class Logger(object):
     def log_histogram(self, tag, values, step, bins=1000):
         """Logs the histogram of a list/vector of values."""
         raise NotImplementedError("This method is not implemented.")
+
+    def log_image(self, img_tensor, epoch: int, dataformats='CHW' ,title: str='image'):
+        """
+            Log an image.
+            params:
+        """
+        self.writer.add_image(title, img_tensor, epoch, dataformats=dataformats)

@@ -15,16 +15,19 @@ import utils.img_utils as imutils
 
 from models.reknetm1 import RekNetM1
 from models.reknetm2 import RekNetM2
-from models.lidcamnet_fcn import LidCamNetEarlyFusion, LidCamNetLateFusion
+from models.lidcamnet_fcn import LidCamNetEarlyFusion, LidCamNetLateFusion, LidCamNet
 
-from data_processing.road_dataset import a2d2_dataset, a2d2_ip_input_file, a2d2_upsample_input_file, a2d2_output_file
+from data_processing.road_dataset import a2d2_dataset, a2d2_dataset_no_lidar, \
+    a2d2_ip_input_file, a2d2_upsample_input_file, a2d2_output_file
 from data_processing.data_processing import crossval_split_a2d2
 
 from misc.losses import BCEJaccardLoss, CCEJaccardLoss
 from misc.polylr_scheduler import PolyLR
 from misc.transforms import (
     train_transformations_a2d2,
-    valid_tranformations_a2d2,
+    transform_normalize_img,
+    valid_transformations_a2d2,
+    transform_normalize_lidar
 )
 
 import torch
@@ -36,7 +39,7 @@ import torch.backends.cudnn as cudnn
 import torch.backends.cudnn
 
 # For reproducibility
-torch.manual_seed(111)
+# torch.manual_seed(111)
 
 
 def main(*args, **kwargs):
@@ -67,7 +70,8 @@ def main(*args, **kwargs):
 
     # other options
     parser.add_argument("--n-epochs", type=int, default=100, help="Number of training epochs.")
-    parser.add_argument("--batch-size", type=int, default=4, help="Number of examples per batch.")
+    parser.add_argument("--batch-size", type=int, default=2, help="Number of examples per batch.")
+    parser.add_argument("--batch-factor", type=int, default=8, help="Number of examples per batch.")
     parser.add_argument("--num-workers", type=int, default=8, help="Number of loading workers.")
     parser.add_argument("--device-ids", type=str, default="0", help="ID of devices for multiple GPUs.")
     parser.add_argument("--alpha", type=float, default=0, help="Modulation factor for custom loss.")
@@ -95,6 +99,9 @@ def main(*args, **kwargs):
     elif args.model_type == "lcn_late":
         model = LidCamNetLateFusion(num_classes=num_classes, bn_enable=True)
         console_logger.info("Using LinCamNet-late as the model.")
+    elif args.model_type == "lcn":
+        model = LidCamNet(num_classes=num_classes, bn_enable=True)
+        console_logger.info("Using LinCamNet as the model.")
     else:
         raise ValueError("Unknown model type: {}".format(args.model_type))
 
@@ -114,25 +121,42 @@ def main(*args, **kwargs):
     loss = BCEJaccardLoss(alpha=args.alpha)
 
     dataset_path = Path(args.dataset_path)
-    images = read_pickle_file(str(dataset_path / a2d2_ip_input_file))
-    masks = read_pickle_file(str(dataset_path / a2d2_output_file))
+    images = utils.read_pickle_file(str(dataset_path / a2d2_ip_input_file))
+    masks = utils.read_pickle_file(str(dataset_path / a2d2_output_file))
 
     # Use data subset
-    images = images[:-round(len(images) / 5)]
-    masks = masks[:-round(len(masks) / 5)]
+    #images = images[:20]
+    #masks = masks[:20]
+
+    images = images[:-round(len(images)/4)]
+    masks = masks[:-round(len(masks)/4)]
 
     # train-val splits for cross-validation by a fold
     ((train_imgs, train_masks), 
         (valid_imgs, valid_masks)) = crossval_split_a2d2(imgs_paths=images, masks_paths=masks, fold=args.fold)
 
     # Define training/validation/ dataset
-    train_dataset = a2d2_dataset(img_paths=train_imgs, mask_paths=train_masks, transforms=train_transformations_a2d2())
-    valid_dataset = a2d2_dataset(img_paths=valid_imgs, mask_paths=valid_masks, transforms=valid_tranformations_a2d2())
+    if args.model_type == "lcn":
+        train_dataset = a2d2_dataset_no_lidar(img_paths=train_imgs, mask_paths=train_masks, \
+                                              transform_image=train_transformations_a2d2(), \
+                                              normalize_image=transform_normalize_lidar())
+        valid_dataset = a2d2_dataset_no_lidar(img_paths=valid_imgs, mask_paths=valid_masks, \
+                                              transform_image=valid_transformations_a2d2(), \
+                                              normalize_image=transform_normalize_lidar())
+    else:
+        train_dataset = a2d2_dataset(img_paths=train_imgs, mask_paths=train_masks, \
+                                     transform_image=train_transformations_a2d2(), \
+                                     normalize_image=transform_normalize_lidar(), \
+                                     normalize_lidar=transform_normalize_lidar())
+        valid_dataset = a2d2_dataset(img_paths=valid_imgs, mask_paths=valid_masks, \
+                                     transform_image=valid_transformations_a2d2(), \
+                                     normalize_image=transform_normalize_lidar(), \
+                                     normalize_lidar=transform_normalize_lidar())
     # valid_fmeasure_datset = a2d2_dataset(img_paths=valid_imgs, mask_paths=valid_masks)
 
     # Create Data Loaders
     train_loader = DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=torch.cuda.is_available())
-    valid_loader = DataLoader(dataset=valid_dataset, batch_size=torch.cuda.device_count(), num_workers=args.num_workers, pin_memory=torch.cuda.is_available())
+    valid_loader = DataLoader(dataset=valid_dataset, batch_size=1, num_workers=args.num_workers, pin_memory=torch.cuda.is_available())
 
     console_logger.info("Train dataset length: {}".format(len(train_dataset)))
     console_logger.info("Validation dataset length: {}".format(len(valid_dataset)))
@@ -160,33 +184,44 @@ def main(*args, **kwargs):
     else:
         raise ValueError("Unknown type of schedule: {}".format(args.scheduler))
 
-    valid = utils.binary_validation_routine_a2d2
-
-    utils.train_routine_a2d2(
-        args=args,
-        console_logger=console_logger,
-        root=args.root_dir,
-        model=model,
-        criterion=loss,
-        optimizer=optim,
-        scheduler=lr_scheduler,
-        train_loader=train_loader,
-        valid_loader=valid_loader,
-        fm_eval_dataset=None,
-        validation=valid,
-        fold=args.fold,
-        num_classes=num_classes,
-        n_epochs=args.n_epochs,
-        status_every=args.status_every
-    )
-
-
-def read_pickle_file(filename: str):
-    if Path(filename).is_file():
-        with open(filename, 'rb') as handle:
-            return pickle.load(handle)
+    if not args.model_type == "lcn":
+        valid = utils.binary_validation_routine_a2d2
+        utils.train_routine_a2d2(
+            args=args,
+            console_logger=console_logger,
+            root=args.root_dir,
+            model=model,
+            criterion=loss,
+            optimizer=optim,
+            scheduler=lr_scheduler,
+            train_loader=train_loader,
+            valid_loader=valid_loader,
+            fm_eval_dataset=None,
+            validation=valid,
+            fold=args.fold,
+            num_classes=num_classes,
+            n_epochs=args.n_epochs,
+            status_every=args.status_every
+        )
     else:
-        raise ValueError(f'Pickle file {filename} does not exist')
+        valid = utils.binary_validation_routine_a2d2_no_lidar
+        utils.train_routine_a2d2_no_lidar(
+            args=args,
+            console_logger=console_logger,
+            root=args.root_dir,
+            model=model,
+            criterion=loss,
+            optimizer=optim,
+            scheduler=lr_scheduler,
+            train_loader=train_loader,
+            valid_loader=valid_loader,
+            fm_eval_dataset=None,
+            validation=valid,
+            fold=args.fold,
+            num_classes=num_classes,
+            n_epochs=args.n_epochs,
+            status_every=args.status_every
+        )
 
 
 if __name__ == "__main__":

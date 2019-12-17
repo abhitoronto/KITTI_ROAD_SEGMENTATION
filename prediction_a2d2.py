@@ -10,209 +10,207 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
 import utils.utils as utils
 from utils.img_utils import alpha_overlay, normalize
 
-from data_processing.road_dataset import load_image_, numpy_to_tensor
+from data_processing.road_dataset import load_rgb_image_, numpy_to_tensor, load_mask_
+from data_processing.road_dataset import a2d2_dataset, a2d2_dataset_no_lidar
 
-from models.reknetm1 import RekNetM1
-from models.reknetm2 import RekNetM2
-from models.lidcamnet_fcn import LidCamNet
+from models.lidcamnet_fcn import LidCamNet, LidCamNetLateFusion, LidCamNetEarlyFusion
 
-from misc.transforms import test_trasformations
+from misc.transforms import valid_transformations_a2d2, \
+                            train_transformations_a2d2, \
+                            transform_normalize_lidar, \
+                            transform_normalize_img
+from misc.losses import BCEJaccardLoss, CCEJaccardLoss
 
-def predict(models: nn.ModuleList, img_path, path2save, thresh=0.5):
-    """
-        Perfrom prediction for single image
-        Params:
-            models     : NN models
-            img_path   : path to an image
-            path2save  :
-            thresh     : prediction threshold
-    """
 
-    img_path = Path(img_path)
+# def predict(model_: nn.Module, img_path: str, gt_path: str, path2save: str, multi_input: bool, thresh: float=0.5):
+#     """
+#         Perform prediction for single image
+#         Params:
+#             model      : NN model
+#             img_path   : path to an image
+#             path2save  : Dir to save the image
+#             thresh     : prediction threshold
+#     """
+#
+#     img_path = Path(img_path)
+#     gt_path = Path(gt_path)
+#     path2save = Path(path2save)
+#
+#     if not img_path.exists():
+#         raise FileNotFoundError("File '{}' not found.".format(str(img_path)))
+#     if not gt_path.exists():
+#         raise FileNotFoundError("File '{}' not found.".format(str(gt_path)))
+#     if not path2save.is_dir():
+#         raise RuntimeError("File '{}' is not dir.".format(str(path2save)))
+#
+#     dest_path = str(path2save / img_path.name)
+#     gt_file_name = 'gt_' + str(img_path.name)
+#     dest_path_gt = str(path2save) + '/' + gt_file_name
+#
+#     src_img = cv2.imread(str(img_path))
+#     gt_mask = load_mask_(str(gt_path))
+#
+#     transform = test_trasformations_a2d2()
+#     augmented = transform(image=src_img)
+#     src_img = augmented["image"]
+#
+#     img2predict = src_img.copy()
+#     img2predict = cv2.cvtColor(img2predict, cv2.COLOR_BGR2RGB).astype(dtype=np.float32)
+#     img2predict = normalize(img2predict)
+#
+#     img2predict = utils.to_gpu(numpy_to_tensor(img2predict).unsqueeze(0).contiguous()).float()
+#
+#     with torch.set_grad_enabled(False):
+#         predict = model_(img2predict)
+#
+#     #Probs
+#     predict = F.sigmoid(predict).squeeze(0).squeeze(0)
+#
+#     mask = (predict > thresh).cpu().numpy().astype(dtype=np.uint8)
+#     overlayed_img = alpha_overlay(src_img, mask)
+#     overlayed_gt_img = alpha_overlay(src_img, gt_mask)
+#
+#     #save
+#     cv2.imwrite(dest_path, overlayed_img)
+#     cv2.imwrite(dest_path_gt, overlayed_gt_img)
+#
+#     #show
+#     #cv2.imshow("Predicted", overlayed_img)
+#     #cv2.imshow("Target", overlayed_gt_img)
+#     #cv2.waitKey(0)
+#     #cv2.destroyAllWindows()
+#
+#     print("Image '{}' was processed successfully.".format(str(img_path)))
 
-    if not img_path.exists():
-        raise FileNotFoundError("File '{}' not found.".format(str(img_path)))
 
-    src_img = cv2.imread(str(img_path))
-
-    transform = test_trasformations()
-    augmented = transform(image=src_img)
-    src_img = augmented["image"]
-
-    img2predict = src_img.copy()
-    img2predict = cv2.cvtColor(img2predict, cv2.COLOR_BGR2RGB).astype(dtype=np.float32)
-    img2predict = normalize(img2predict)
-
-    img2predict = utils.to_gpu(numpy_to_tensor(img2predict).unsqueeze(0).contiguous()).float()
-
-    if len(models) == 1:
-        #evaluate mode
-        model = models[0].eval()
-
-        with torch.set_grad_enabled(False):
-            predict = model(img2predict)
-    
-        #Probs
-        predict = F.sigmoid(predict).squeeze(0).squeeze(0)
-
-        mask = (predict > thresh).cpu().numpy().astype(dtype=np.uint8)
-        overlayed_img = alpha_overlay(src_img, mask)
-    else:
-        #Averaging all predictions for one point of test data
-        sum_predicts = utils.to_gpu(torch.zeros((1, 1, src_img.shape[0], src_img.shape[1])).float())    
-        
-        for model in models:
-            model.eval()
-            with torch.set_grad_enabled(False):
-                predict = model(img2predict)
-            sum_predicts += F.sigmoid(predict)
-        
-        predict = (sum_predicts / len(models)).squeeze(0).squeeze(0).float()
-
-        mask = (predict > thresh).cpu().numpy().astype(dtype=np.uint8)
-        overlayed_img = alpha_overlay(src_img, mask)
-
-    #save
-    cv2.imwrite(path2save, overlayed_img)
-    
-    #show
-    cv2.imshow("Predicted", overlayed_img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    print("Image '{}' was processed successfully.".format(str(img_path)))
-    
-
-def predict_batch(models: nn.ModuleList, path2images, path2save, thresh=0.5):
+def predict_batch(model: nn.Module, paths2images: list, gt_paths: list, path2save: str, multi_input: bool, thresh=0.5):
     """
         Perfrom prediction for a batch images
         Params:
-            models          : NN models
-            path2images     : path to an image
-            path2save       : should be a dir
+            model          : NN models
+            path2images     : list of Paths to images
+            path2save       : Directory to save images
+            gt_path         :
             thresh          : prediction threshold
     """
 
-    path2images = Path(path2images)
     path2save = Path(path2save)
-
-    if not path2images.is_dir():
-        raise RuntimeError("File '{}' is not dir.".format(str(path2images)))
 
     if not path2save.is_dir():
         raise RuntimeError("File '{}' is not dir.".format(str(path2save)))
 
-    imgs_paths = sorted(list(path2images.glob("*")))
+    if multi_input:
+        dataset = a2d2_dataset(img_paths=paths2images, mask_paths=gt_paths,\
+                               transform_image= valid_transformations_a2d2(),\
+                               normalize_image= transform_normalize_img(),\
+                               normalize_lidar= transform_normalize_lidar())
+        loss = BCEJaccardLoss(alpha=0)
+        dataloader = DataLoader(dataset=dataset, batch_size=1, num_workers=1, pin_memory=torch.cuda.is_available())
 
-    count_processed = 0
-    for idx, ip in enumerate(imgs_paths):
-        src_img = cv2.imread(str(ip))
+        _, target_images, output_images = utils.binary_validation_routine_a2d2(model, loss, dataloader, save_image=True)
 
-        transform = test_trasformations()
-        augmented = transform(image=src_img)
-        src_img = augmented["image"]
+        for idx, (img_t, img_o, gt) in enumerate(zip(target_images, output_images, gt_paths)):
+            if not Path(gt).is_file():
+                raise RuntimeError("'{}' is not a file.".format(str(gt)))
 
-        img2predict = src_img.copy()
-        img2predict = cv2.cvtColor(img2predict, cv2.COLOR_BGR2RGB).astype(dtype=np.float32)
-        img2predict = normalize(img2predict)
+            t_name = str(path2save) + '/' + 'target_' + str(Path(gt).name)
+            o_name = str(path2save) + '/' + 'prediction_' + str(Path(gt).name)
 
-        img2predict = utils.to_gpu(numpy_to_tensor(img2predict).unsqueeze(0).contiguous()).float()
+            cv2.imwrite(t_name, img_t)
+            cv2.imwrite(o_name, img_o)
 
-        if len(models) == 1:
-            model = models[0].eval()
-            
-            with torch.set_grad_enabled(False):
-                predict = model(img2predict)
-    
-            #Probs
-            predict = F.sigmoid(predict).squeeze(0).squeeze(0)
+            print(f'{idx} images were processed.')
+        metrics = utils.fmeasure_evaluation_a2d2(model, dataset)
 
-            mask = (predict > thresh).cpu().numpy().astype(dtype=np.uint8)
-            overlayed_img = alpha_overlay(src_img, mask)
-        else:
-            #Averaging all predictions for one point of test data
-            sum_predicts = utils.to_gpu(torch.zeros((1, 1, src_img.shape[0], src_img.shape[1])).float())    
-        
-            for model in models:
-                model.eval()
-                with torch.set_grad_enabled(False):
-                    predict = model(img2predict)
-                sum_predicts += F.sigmoid(predict)
-        
-            predict = (sum_predicts / len(models)).squeeze(0).squeeze(0).float()
+    else:
 
-            mask = (predict > thresh).cpu().numpy().astype(dtype=np.uint8)
-            overlayed_img = alpha_overlay(src_img, mask)
+        dataset = a2d2_dataset_no_lidar(img_paths=paths2images, mask_paths=gt_paths,
+                               transform_image= valid_transformations_a2d2(),\
+                               normalize_image= transform_normalize_img())
+        loss = BCEJaccardLoss(alpha=0)
+        dataloader = DataLoader(dataset=dataset, batch_size=1, num_workers=1, pin_memory=torch.cuda.is_available())
 
-        #save
-        cv2.imwrite(str(path2save / "{}".format(ip.name)), overlayed_img)
-    
-        print("Image '{}' was processed successfully.".format(str(ip)))
-        count_processed += 1
-    
-    print("{} images were processed.".format(count_processed))
+        _, target_images, output_images = utils.binary_validation_routine_a2d2_no_lidar(model, loss, dataloader, save_image=True)
+
+        for idx, (img_t, img_o, gt) in enumerate(zip(target_images, output_images, gt_paths)):
+            if not Path(gt).is_file():
+                raise RuntimeError("'{}' is not a file.".format(str(gt)))
+
+            t_name = str(path2save) + '/' + 'target_' + str(Path(gt).name)
+            o_name = str(path2save) + '/' + 'prediction_' + str(Path(gt).name)
+
+            cv2.imwrite(t_name, img_t)
+            cv2.imwrite(o_name, img_o)
+
+            print(f'{idx} images were processed.')
+        metrics = utils.fmeasure_evaluation_a2d2_no_lidar(model, dataset)
+    info_str = "-" * 30
+    info_str += "\nMaxF: {0}".format(metrics["MaxF"])
+    info_str += "\nAvgPrec: {0}".format(metrics["AvgPrec"])
+    info_str += "\nPRE: {0}".format(metrics["PRE_wp"][0])
+    info_str += "\nREC: {0}".format(metrics["REC_wp"][0])
+    info_str += "\nFPR: {0}".format(metrics["FPR_wp"][0])
+    info_str += "\nFNR: {0}\n".format(metrics["FNR_wp"][0])
+    print(info_str)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Prediction module parameters.")
-    parser.add_argument("--mode", type=str, default="single", help="Model of prediction. Can be 'single' of 'multiple'.")
+    parser.add_argument("--mode", type=str, default="single", help="Model of prediction. Can be 'single' or 'multiple'.")
     parser.add_argument("--model-path", type=str, required=True, help="Path to a model or models. If path is a dir then models from this dir will be averaged.")
-    parser.add_argument("--model-type", type=str, default="reknetm1")
-    parser.add_argument("--path2image", type=str, required=True, help="Path to a single image or dir of images.")
-    parser.add_argument("--path2save", type=str, required=True, help="Path to save. Can be a single file or dir.")
+    parser.add_argument("--model-type", type=str, default="lcn")
+    parser.add_argument("--path2image", type=str, required=True, help="Path to a single image or pickle file with images. (multiple)")
+    parser.add_argument("--path2gt", type=str, required=True, help="Path to a single gt image or pickle file with images. (multiple)")
+    parser.add_argument("--path2save", type=str, required=True, help="Directory to save the file")
     parser.add_argument("--thresh", type=float, default=0.5)
+    parser.add_argument("--num-images", type=int, default=10)
 
     args = parser.parse_args()
 
     model_path = Path(args.model_path)
 
-    if args.model_type == "reknetm1":
-        model = RekNetM1(num_classes=1, 
-            ebn_enable=True, 
-            dbn_enable=True, 
-            upsample_enable=False, 
-            act_type="celu",
-            init_type="He")
-        print("Uses RekNetM1 as the model.")
-    elif args.model_type == "reknetm2":
-        model = RekNetM2(num_classes=1,
-            ebn_enable=True, 
-            dbn_enable=True, 
-            act_type="celu",
-            upsample_enable=False, 
-            init_type="He")
-        print("Uses RekNetM2 as the model.")
-    elif args.model_type == "lcn":
+    multi_input = False
+
+    if args.model_type == "lcn":
         model = LidCamNet(num_classes=1,
-            bn_enable=False)
+            bn_enable=True)
         print("Uses LidCamNet as the model.")
+    elif args.model_type == "lcn_early":
+        model = LidCamNetEarlyFusion(num_classes=1,
+            bn_enable=True)
+        multi_input = True
+        print("Uses LidCamNet early fusion as the model.")
+    elif args.model_type == "lcn_late":
+        model = LidCamNetLateFusion(num_classes=1,
+            bn_enable=True)
+        multi_input = True
+        print("Uses LidCamNet late fusion as the model.")
     else:
         raise ValueError("Unknown model type: {}".format(args.model_type))
 
     if torch.cuda.is_available():
         model = nn.DataParallel(model, device_ids=None).cuda()
 
-    model_list = nn.ModuleList()
     if model_path.is_file():
         state = torch.load(str(model_path))
         model.load_state_dict(state["model"])
-        model_list.append(model)
     else:
-        models_paths = sorted(list(model_path.glob("*")))
-        for mp in models_paths:
-            p = mp / "model.pt"
-            state = torch.load(str(p))
-            model.load_state_dict(state["model"])
-            model_list.append(model)
+        raise ValueError('model-path is not a file')
 
     if args.mode == "single":
-        predict(models=model_list, img_path=args.path2image, path2save=args.path2save, thresh=args.thresh)
+        predict_batch(model=model, paths2images=[[args.path2image, '', '', '']], gt_paths=[args.path2gt], path2save=args.path2save, thresh=args.thresh, multi_input=multi_input)
     elif args.mode == "multiple":
-        predict_batch(models=model_list, path2images=args.path2image, path2save=args.path2save, thresh=args.thresh)
+        # Read Pickle files for image paths and extract the test set
+        img_paths = utils.read_pickle_file(str(args.path2image))
+        gt_paths = utils.read_pickle_file(str(args.path2gt))
+        img_paths = img_paths[-round(len(img_paths)/4):-round(len(img_paths)/4) + args.num_images]
+        gt_paths = gt_paths[-round(len(gt_paths)/4):-round(len(gt_paths)/4) + args.num_images]
+
+        predict_batch(model=model, paths2images=img_paths, gt_paths=gt_paths, path2save=args.path2save, thresh=args.thresh, multi_input=multi_input)
     else:
         raise ValueError("Unknown mode: {}".format(args.mode))
-    
